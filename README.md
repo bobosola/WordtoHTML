@@ -147,3 +147,7 @@ placed in a minimal HTML document before being written to disk.
 src/main.rs   # entire converter
 Cargo.toml    # package manifest (deps: quick-xml, zip)
 ```
+
+## License
+
+Released under the [MIT License](LICENSE).
