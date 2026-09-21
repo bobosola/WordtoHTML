@@ -1,0 +1,8 @@
+[package]
+name = "wordtohtml"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quick-xml = "0.36"
+zip = "2"
