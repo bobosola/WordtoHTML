@@ -13,7 +13,8 @@ const USAGE: &str = concat!(
     "\n",
     "options:\n",
     "  -w, --wrap <columns>  Wrap output near this many characters (default 90).\n",
-    "                        Use 0 for a single line with no newlines.\n",
+    "                        Use 0 for a single line; newlines inside code\n",
+    "                        blocks are kept either way.\n",
     "  -h, --help            Show this help.",
 );
 
@@ -90,10 +91,11 @@ fn parse_args() -> Result<Options, String> {
 }
 
 // Build the final HTML document. `width` is the wrap column; 0 means a single
-// line with no newlines at all.
+// line with no newlines at all, except inside code blocks where the newlines
+// are part of the content.
 fn build_document(body: &str, input: &Path, width: usize) -> String {
     if width == 0 {
-        wrap_document(body, input).replace('\n', "")
+        wrap_document(&strip_newlines(body), input)
     } else {
         wrap_document(&wrap(body, width), input)
     }
@@ -295,6 +297,15 @@ struct State {
     strike: bool,
     subscript: bool,
     superscript: bool,
+    mono: bool,
+
+    // Paragraph-level code state. `pre` is set by a preformatted/code paragraph
+    // style; `mono_only` records whether every text run so far used a monospace
+    // font or code character style, so a fully monospace paragraph can become a
+    // <pre><code> block instead of prose with inline <code> tags.
+    pre: bool,
+    mono_only: bool,
+    runs: usize,
 
     // List state. num_id/num_level are set from the current paragraph's numPr
     // and consumed when that paragraph closes.
@@ -335,7 +346,10 @@ fn parse_document(
             }
             Ok(Event::Text(e)) => {
                 if state.in_text {
-                    let text = escape(&e.unescape().unwrap_or_default());
+                    // Code content keeps its tabs and newlines; everywhere else
+                    // whitespace collapses to single spaces.
+                    let text =
+                        escape_text(&e.unescape().unwrap_or_default(), state.pre || state.mono);
                     state.run.push_str(&text);
                 }
             }
@@ -354,7 +368,7 @@ fn parse_document(
 // runs of adjacent tags such as <em>very</em><em> </em><em>long</em>. Since the
 // formatting is identical, stitch them into one tag.
 fn merge_adjacent(html: &str) -> String {
-    const TAGS: [&str; 6] = ["em", "strong", "u", "s", "sub", "sup"];
+    const TAGS: [&str; 7] = ["em", "strong", "u", "s", "sub", "sup", "code"];
     let mut out = html.to_string();
     loop {
         let mut changed = false;
@@ -372,6 +386,38 @@ fn merge_adjacent(html: &str) -> String {
     out
 }
 
+// Join the markup onto one line for --wrap 0, but keep the newlines inside a
+// <pre> block: those are the code's own line breaks, not formatting.
+fn strip_newlines(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut in_pre = false;
+    let mut tag = String::new();
+
+    for c in html.chars() {
+        if c == '<' {
+            in_tag = true;
+            tag.clear();
+        }
+        if in_tag {
+            tag.push(c);
+        }
+        if c == '>' {
+            in_tag = false;
+            if tag.starts_with("<pre") {
+                in_pre = true;
+            } else if tag.starts_with("</pre") {
+                in_pre = false;
+            }
+        }
+        if c == '\n' && !in_pre {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 // Wrap lines at spaces near 90 characters so the HTML can be read in an
 // editor without horizontal scrolling. Newlines are whitespace in HTML.
 fn wrap(html: &str, limit: usize) -> String {
@@ -384,6 +430,10 @@ fn wrap(html: &str, limit: usize) -> String {
     let mut len = 0;
     let mut last_space: Option<usize> = None;
     let mut in_tag = false;
+    // Code blocks are emitted verbatim: no re-wrapping and no stripping of the
+    // leading spaces that carry indentation.
+    let mut in_pre = false;
+    let mut tag = String::new();
 
     for c in html.chars() {
         if c == '\n' {
@@ -398,25 +448,36 @@ fn wrap(html: &str, limit: usize) -> String {
 
         if c == '<' {
             in_tag = true;
+            tag.clear();
         }
 
-        if c == ' ' && len == 0 && !in_tag {
+        if c == ' ' && len == 0 && !in_tag && !in_pre {
             continue; // no leading space on a wrapped line
         }
 
         line.push(c);
         len += 1;
 
+        if in_tag {
+            tag.push(c);
+        }
+
         if c == '>' {
             in_tag = false;
+            if tag.starts_with("<pre") {
+                in_pre = true;
+            } else if tag.starts_with("</pre") {
+                in_pre = false;
+            }
         }
         if c == ' ' && !in_tag {
             last_space = Some(line.len() - 1);
         }
 
         // Break at the last space once the line goes past the limit. Tags are
-        // never split, so a very long tag or URL can still exceed the limit.
-        if len > limit && !in_tag {
+        // never split, so a very long tag or URL can still exceed the limit,
+        // and <pre> content is left exactly as it was written.
+        if len > limit && !in_tag && !in_pre {
             if let Some(i) = last_space {
                 out.push_str(&line[..i]);
                 out.push('\n');
@@ -436,6 +497,9 @@ fn open(e: &BytesStart, state: &mut State, rels: &HashMap<String, String>) {
         b"w:p" => {
             state.paragraph.clear();
             state.heading = 0;
+            state.pre = false;
+            state.mono_only = true;
+            state.runs = 0;
             state.num_id = None;
             state.num_level = 0;
         }
@@ -474,6 +538,7 @@ fn open(e: &BytesStart, state: &mut State, rels: &HashMap<String, String>) {
         b"w:pStyle" => {
             if let Some(style) = attr_value(e, b"w:val") {
                 state.heading = heading_level(&style);
+                state.pre = is_pre_style(&style);
             }
         }
         b"w:hyperlink" => {
@@ -508,6 +573,16 @@ fn open(e: &BytesStart, state: &mut State, rels: &HashMap<String, String>) {
             state.strike = false;
             state.subscript = false;
             state.superscript = false;
+            state.mono = false;
+        }
+        // A monospace family on any script makes the run code.
+        b"w:rFonts" => {
+            for key in [b"w:ascii".as_slice(), b"w:hAnsi", b"w:cs", b"w:eastAsia"] {
+                if attr_value(e, key).is_some_and(|name| is_mono_font(&name)) {
+                    state.mono = true;
+                    break;
+                }
+            }
         }
         b"w:b" | b"w:bCs" => state.bold = run_flag(e),
         b"w:i" | b"w:iCs" => state.italic = run_flag(e),
@@ -535,10 +610,27 @@ fn open(e: &BytesStart, state: &mut State, rels: &HashMap<String, String>) {
                     "emphasis" => state.italic = true,
                     _ => {}
                 }
+                if is_mono_style(&style) {
+                    state.mono = true;
+                }
             }
         }
-        b"w:br" | b"w:cr" => state.run.push_str("<br>"),
-        b"w:tab" => state.run.push(' '),
+        // Inside code a break stays a newline and a tab keeps its width; both
+        // survive verbatim in the emitted <pre>.
+        b"w:br" | b"w:cr" => {
+            if state.pre || state.mono {
+                state.run.push('\n');
+            } else {
+                state.run.push_str("<br>");
+            }
+        }
+        b"w:tab" => {
+            if state.pre || state.mono {
+                state.run.push('\t');
+            } else {
+                state.run.push(' ');
+            }
+        }
         b"w:t" => state.in_text = true,
         _ => {}
     }
@@ -550,6 +642,7 @@ fn close(name: &[u8], state: &mut State) {
         b"w:r" => {
             let text = std::mem::take(&mut state.run);
             if !text.is_empty() {
+                let blank = text.trim().is_empty();
                 // Nest formatting in a fixed order so identical formatting in
                 // adjacent runs can be merged later by merge_adjacent().
                 let mut out = text;
@@ -571,10 +664,22 @@ fn close(name: &[u8], state: &mut State) {
                 if state.strike {
                     out = format!("<s>{out}</s>");
                 }
+                // A preformatted paragraph wraps the block as a whole, so only
+                // inline code gets its own <code> tag here.
+                if state.mono && !state.pre {
+                    out = format!("<code>{out}</code>");
+                }
                 if state.href.is_some() {
                     state.link_text.push_str(&out);
                 } else {
                     state.paragraph.push_str(&out);
+                }
+
+                state.runs += 1;
+                // Whitespace-only runs (Word often splits those out) must not
+                // stop a code paragraph from being recognised.
+                if !state.mono && !blank {
+                    state.mono_only = false;
                 }
             }
         }
@@ -632,6 +737,30 @@ fn close(name: &[u8], state: &mut State) {
                     }
                     state.cell.push_str(&content);
                 }
+            } else if state.pre
+                || (state.mono_only
+                    && state.runs > 0
+                    && state.heading == 0
+                    && state.num_id.is_none())
+            {
+                // A code paragraph: keep its text verbatim. Runs in a
+                // preformatted paragraph were never wrapped in <code>, but a
+                // paragraph that is entirely monospace was, so unwrap those
+                // individual tags before wrapping the block as a whole.
+                flush_lists(state);
+                let content = if state.pre {
+                    content
+                } else {
+                    content.replace("<code>", "").replace("</code>", "")
+                };
+                let content = if content.trim().is_empty() {
+                    "\n".to_string()
+                } else {
+                    content
+                };
+                state
+                    .html
+                    .push_str(&format!("<pre><code>{content}</code></pre>\n\n"));
             } else if state.num_id.is_some() && !content.is_empty() {
                 let level = state.num_level;
                 let tag = list_tag(&state.numbering, state.num_id.as_deref(), level);
@@ -753,7 +882,78 @@ fn escape_attr(s: &str) -> String {
     escape(s).replace('"', "&quot;")
 }
 
+// Strip separators and case from a Word style id so "HTML Preformatted",
+// "htmlpreformatted" and "Source-Code" can all be matched the same way.
+fn normalize_style(style: &str) -> String {
+    style
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+// Paragraph styles that mean "preformatted text" in Word and common exporters.
+fn is_pre_style(style: &str) -> bool {
+    matches!(
+        normalize_style(style).as_str(),
+        "pre"
+            | "preformatted"
+            | "htmlpreformatted"
+            | "htmlpre"
+            | "code"
+            | "codeblock"
+            | "sourcecode"
+            | "macro"
+            | "macrotext"
+            | "plaintext"
+    )
+}
+
+// Character styles that mark inline or block code.
+fn is_mono_style(style: &str) -> bool {
+    is_pre_style(style)
+        || matches!(
+            normalize_style(style).as_str(),
+            "htmlcode" | "verbatim" | "verbatimchar" | "codephrase" | "inlinecode"
+        )
+}
+
+// Heuristic: does a Word font name denote a monospace family? Word stores the
+// family as free text ("Consolas", "Courier New", "JetBrains Mono"), so names
+// are matched by substring plus a few exact names that lack a giveaway word.
+fn is_mono_font(name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    const HINTS: [&str; 12] = [
+        "mono",
+        "courier",
+        "consolas",
+        "menlo",
+        "monaco",
+        "console",
+        "typewriter",
+        "fixed",
+        "terminal",
+        "inconsolata",
+        "cascadia",
+        "andale",
+    ];
+    if HINTS.iter().any(|hint| name.contains(hint)) {
+        return true;
+    }
+    matches!(
+        name.as_str(),
+        "fira code" | "source code pro" | "anonymous pro" | "iosevka" | "input" | "hack" | "m+ 1m"
+    )
+}
+
 fn escape(s: &str) -> String {
+    escape_text(s, false)
+}
+
+// Escape text for HTML content. `preserve_ws` keeps tabs and newlines for code
+// (they survive as written inside <pre>); otherwise whitespace is collapsed so
+// the generated HTML's only newlines are the structural ones.
+fn escape_text(s: &str, preserve_ws: bool) -> String {
     let mut out = String::new();
     for c in s.chars() {
         match c {
@@ -771,11 +971,87 @@ fn escape(s: &str) -> String {
             '\u{2014}' => out.push_str("&mdash;"),
             '\u{2026}' => out.push_str("&hellip;"),
             '\u{00A0}' => out.push_str("&nbsp;"),
-            // Normalise whitespace so text never contains raw newlines; the
-            // generated HTML's only newlines are the structural ones.
-            '\n' | '\r' | '\t' => out.push(' '),
+            '\n' | '\r' | '\t' => {
+                if preserve_ws {
+                    out.push(c);
+                } else {
+                    out.push(' ');
+                }
+            }
             _ => out.push(c),
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_fonts_are_detected() {
+        for mono in [
+            "Consolas",
+            "Courier New",
+            "JetBrains Mono",
+            "Fira Code",
+            "Source Code Pro",
+            "Hack",
+        ] {
+            assert!(is_mono_font(mono), "{mono} should be monospace");
+        }
+        for proportional in ["Calibri", "Cambria", "Encode Sans", "Input Sans"] {
+            assert!(
+                !is_mono_font(proportional),
+                "{proportional} is not monospace"
+            );
+        }
+    }
+
+    #[test]
+    fn code_styles_are_detected() {
+        for style in [
+            "HTMLPreformatted",
+            "HTML Preformatted",
+            "Source Code",
+            "Code",
+        ] {
+            assert!(is_pre_style(style), "{style} should be a pre style");
+        }
+        for style in ["HTMLCode", "VerbatimChar", "Code"] {
+            assert!(is_mono_style(style), "{style} should mark inline code");
+        }
+        assert!(!is_pre_style("Heading1"));
+        assert!(!is_mono_style("Strong"));
+        assert!(!is_mono_style("Emphasis"));
+    }
+
+    #[test]
+    fn wrap_leaves_pre_content_alone() {
+        let html = "<pre><code>    indented\n  line\n</code></pre>\n\n<p>plain words here</p>";
+        let wrapped = wrap(html, 20);
+        assert!(
+            wrapped.contains("<pre><code>    indented\n  line\n</code></pre>"),
+            "pre content was altered: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn wrap_still_breaks_prose() {
+        let wrapped = wrap("<p>one two three four five</p>", 10);
+        assert!(wrapped.contains('\n'), "long prose should wrap: {wrapped}");
+    }
+
+    #[test]
+    fn wrap_zero_keeps_code_newlines() {
+        let html = "<pre><code>a\nb</code></pre>\n\n<p>x</p>";
+        assert_eq!(strip_newlines(html), "<pre><code>a\nb</code></pre><p>x</p>");
+    }
+
+    #[test]
+    fn escape_keeps_whitespace_only_for_code() {
+        assert_eq!(escape_text("a\tb\nc", true), "a\tb\nc");
+        assert_eq!(escape_text("a\tb\nc", false), "a b c");
+        assert_eq!(escape_text("a < b", true), "a &lt; b");
+    }
 }

@@ -24,6 +24,14 @@ SimpleAlbum Blog.docx  ->  SimpleAlbum Blog.html
   - Word's built-in `Strong` and `Emphasis` character styles are recognised
   - Adjacent runs with identical formatting are merged into one tag
 - **Line breaks** (`<w:br/>`, `<w:cr/>`) -> `<br>`, and tabs -> a space
+  (a break or tab inside code is kept as a newline/tab)
+- **Monospace text** -> `<code>`; a paragraph that is entirely monospace, or
+  uses a preformatted/code paragraph style (`HTML Preformatted`, `Source Code`),
+  becomes a `<pre><code>` block. Runs are recognised by font (`Consolas`,
+  `Courier New`, `JetBrains Mono`, …) and by Word's `HTML Code` / `Code` /
+  `VerbatimChar` character styles. Spaces, tabs and line breaks inside a code
+  block are preserved verbatim, and no CSS is emitted, so the page styles
+  `pre`/`code` itself.
 - **Internal links** (`w:anchor`, e.g. table-of-contents entries) -> `<a href="#bookmark">`
 - **Hyperlinks** -> `<a href="...">`
 - **Typographic punctuation** cleaned up for the web:
