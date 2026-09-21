@@ -34,6 +34,12 @@ SimpleAlbum Blog.docx  ->  SimpleAlbum Blog.html
   `pre`/`code` itself.
 - **Internal links** (`w:anchor`, e.g. table-of-contents entries) -> `<a href="#bookmark">`
 - **Hyperlinks** -> `<a href="...">`
+- **Symbol-font glyphs** (`w:sym`, e.g. a Wingdings smiley) -> the matching
+  Unicode character (`🙂`), so they render instead of vanishing. Word stores
+  these as an index into the named font rather than a character, so `Symbol`,
+  `Wingdings`, `Wingdings 2`, `Wingdings 3` and `Webdings` each have a glyph
+  table (`w:char="F04A"` is Wingdings 0x4A, a smiley). Faces become colour
+  emoji (`U+1F642`) rather than the legacy monochrome code points
 - **Typographic punctuation** cleaned up for the web:
   - `’` / `‘` -> `'`
   - `”` / `“` -> `"`
@@ -152,8 +158,9 @@ placed in a minimal HTML document before being written to disk.
 ## Project layout
 
 ```
-src/main.rs   # entire converter
-Cargo.toml    # package manifest (deps: quick-xml, zip)
+src/main.rs      # converter: parse, transform, wrap, write
+src/symbols.rs   # `w:sym` font tables (Symbol, Wingdings, Webdings) -> Unicode
+Cargo.toml       # package manifest (deps: quick-xml, zip)
 ```
 
 ## License

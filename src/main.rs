@@ -3,8 +3,10 @@ use std::io::Read;
 use std::path::Path;
 use std::process::exit;
 
-use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
+
+mod symbols;
 
 const USAGE: &str = concat!(
     "usage: wordtohtml [OPTIONS] <path-to-docx>\n",
@@ -629,6 +631,19 @@ fn open(e: &BytesStart, state: &mut State, rels: &HashMap<String, String>) {
                 state.run.push('\t');
             } else {
                 state.run.push(' ');
+            }
+        }
+        // A symbol-font glyph such as a Wingdings smiley. Word spells it as a
+        // font index rather than a character, so translate it before the run is
+        // flushed; otherwise the whole element is lost.
+        b"w:sym" => {
+            let font = attr_value(e, b"w:font").unwrap_or_default();
+            let code =
+                attr_value(e, b"w:char").and_then(|v| u32::from_str_radix(v.trim(), 16).ok());
+            if let Some(c) = code.and_then(|c| symbols::to_char(&font, c)) {
+                // Goes through escape() like any other text: the Symbol table
+                // maps some indices to &, < and >.
+                state.run.push_str(&escape(&c.to_string()));
             }
         }
         b"w:t" => state.in_text = true,
