@@ -47,7 +47,7 @@ SimpleAlbum Blog.docx  ->  SimpleAlbum Blog.html
 
 ## Requirements
 
-- Rust (edition 2021). Built and tested with `cargo 1.98`.
+- Rust (edition 2024, so Rust 1.85 or newer). Built and tested with `cargo 1.98`.
 - No external tools or Office installation are needed.
 
 ## Build
