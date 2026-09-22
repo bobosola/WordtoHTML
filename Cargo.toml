@@ -6,5 +6,6 @@ rust-version = "1.85"
 license = "MIT"
 
 [dependencies]
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 quick-xml = "0.36"
 zip = "2"

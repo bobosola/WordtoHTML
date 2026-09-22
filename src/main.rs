@@ -11,9 +11,15 @@ mod symbols;
 const USAGE: &str = concat!(
     "usage: wordtohtml [OPTIONS] <path-to-docx>\n",
     "\n",
-    "Converts a Word .docx file to HTML next to the input, e.g. doc.docx -> doc.html.\n",
+    "Converts a Word .docx file to HTML. By default the converted fragment (no\n",
+    "<!DOCTYPE>, <html>, <head> or <body> wrapper) is copied to the clipboard,\n",
+    "ready to paste into an existing HTML template. With --output the fragment is\n",
+    "wrapped in a minimal HTML document and written next to the input instead.\n",
     "\n",
     "options:\n",
+    "  -o, --output          Write the complete HTML document next to the input\n",
+    "                        (doc.docx -> doc.html) instead of copying the\n",
+    "                        fragment to the clipboard.\n",
     "  -w, --wrap <columns>  Wrap output near this many characters (default 90).\n",
     "                        Use 0 for a single line; newlines inside code\n",
     "                        blocks are kept either way.\n",
@@ -22,10 +28,27 @@ const USAGE: &str = concat!(
 
 struct Options {
     input: String,
+    output: bool,
     wrap: usize,
 }
 
+// On Linux the process that sets the clipboard owns it, so a short-lived command
+// would lose the content on exit. Re-exec ourselves in the background to serve
+// paste requests; the parent passes the HTML to the child on stdin. See
+// `copy_to_clipboard` and arboard's `SetExtLinux::wait`.
+#[cfg(target_os = "linux")]
+const CLIPBOARD_DAEMON_ARG: &str = "__wordtohtml_clipboard_daemon";
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some(CLIPBOARD_DAEMON_ARG) {
+        if let Err(e) = run_clipboard_daemon() {
+            eprintln!("error: could not copy to clipboard: {e}");
+            exit(1);
+        }
+        return;
+    }
+
     let opts = match parse_args() {
         Ok(opts) => opts,
         Err(e) => {
@@ -35,7 +58,6 @@ fn main() {
     };
 
     let input = Path::new(&opts.input);
-    let output = input.with_extension("html");
 
     let body = match docx_to_html(&opts.input) {
         Ok(body) => body,
@@ -45,19 +67,29 @@ fn main() {
         }
     };
 
-    let html = build_document(&body, input, opts.wrap);
+    let fragment = build_fragment(&body, opts.wrap);
 
-    if let Err(e) = std::fs::write(&output, html) {
-        eprintln!("error: could not write {}: {e}", output.display());
-        exit(1);
+    if opts.output {
+        let output = input.with_extension("html");
+        let html = wrap_document(&fragment, input);
+        if let Err(e) = std::fs::write(&output, html) {
+            eprintln!("error: could not write {}: {e}", output.display());
+            exit(1);
+        }
+        println!("wrote {}", output.display());
+    } else {
+        if let Err(e) = copy_to_clipboard(&fragment) {
+            eprintln!("error: could not copy to clipboard: {e}");
+            exit(1);
+        }
+        println!("copied to clipboard");
     }
-
-    println!("wrote {}", output.display());
 }
 
 fn parse_args() -> Result<Options, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut wrap = 90usize;
+    let mut output = false;
     let mut input: Option<String> = None;
 
     let mut i = 0;
@@ -68,6 +100,7 @@ fn parse_args() -> Result<Options, String> {
                 println!("{USAGE}");
                 exit(0);
             }
+            "-o" | "--output" => output = true,
             "-w" | "--wrap" => {
                 i += 1;
                 let value = args.get(i).ok_or("--wrap requires a value")?;
@@ -89,18 +122,88 @@ fn parse_args() -> Result<Options, String> {
     }
 
     let input = input.ok_or("missing <path-to-docx>")?;
-    Ok(Options { input, wrap })
+    Ok(Options {
+        input,
+        output,
+        wrap,
+    })
 }
 
-// Build the final HTML document. `width` is the wrap column; 0 means a single
-// line with no newlines at all, except inside code blocks where the newlines
-// are part of the content.
-fn build_document(body: &str, input: &Path, width: usize) -> String {
+// Build the HTML fragment for the document body. `width` is the wrap column; 0
+// means a single line with no newlines at all, except inside code blocks where
+// the newlines are part of the content.
+fn build_fragment(body: &str, width: usize) -> String {
     if width == 0 {
-        wrap_document(&strip_newlines(body), input)
+        strip_newlines(body)
     } else {
-        wrap_document(&wrap(body, width), input)
+        wrap(body, width)
     }
+}
+
+// Copy the fragment to the system clipboard so it can be pasted straight into
+// an existing HTML template. On Linux the clipboard is owned by the copying
+// process, so hand the text to a background copy of ourselves that keeps serving
+// paste requests after this process exits.
+fn copy_to_clipboard(html: &str) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        if let Ok(mut child) = Command::new(std::env::current_exe()?)
+            .arg(CLIPBOARD_DAEMON_ARG)
+            // Detach into its own process group so closing the terminal does not
+            // take the clipboard owner down with it.
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            // Wait for the daemon to confirm it reached the clipboard before
+            // sending the text, so a headless session falls back cleanly below.
+            let mut ready = String::new();
+            let ok = child
+                .stdout
+                .take()
+                .map(|out| BufReader::new(out).read_line(&mut ready).is_ok())
+                .unwrap_or(false)
+                && ready.trim() == "ready";
+
+            if ok {
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(html.as_bytes())?;
+                }
+                return Ok(());
+            }
+            let _ = child.wait();
+        }
+    }
+
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(html.to_string())?;
+    Ok(())
+}
+
+// Runs in the background on Linux: it owns the clipboard and serves paste
+// requests until something else replaces the contents.
+#[cfg(target_os = "linux")]
+fn run_clipboard_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    use arboard::SetExtLinux;
+    use std::io::Write;
+
+    // Initialise before reading stdin so the parent learns early if the
+    // clipboard is unavailable (for example, no display server).
+    let mut clipboard = arboard::Clipboard::new()?;
+    let mut stdout = std::io::stdout();
+    stdout.write_all(b"ready\n")?;
+    stdout.flush()?;
+
+    let mut html = String::new();
+    std::io::stdin().read_to_string(&mut html)?;
+    clipboard.set().wait().text(html)?;
+    Ok(())
 }
 
 // Wrap the converted fragment in a minimal HTML document. The charset
