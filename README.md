@@ -2,7 +2,7 @@
 
 This is a small cross-platform command-line tool that converts a Microsoft Word `.docx` document into clean minimal HTML. It is designed for turning blog posts written in Word into HTML that you can paste directly into a website or CMS.
 
-By default it copies the converted document text to the clipboard. You can also optionally pass `-o`  (`--output`) to write a complete minimal HTML file named as per the Word document and in the same location.
+By default it copies the converted document text to the clipboard. You can also optionally pass `-o`  (or `--output`) to write a complete minimal HTML file named as per the Word document and in the same location. Line wrapping (newlines) defaults to around 90 columns but is optionally adjustable with, e.g. `-w 60` (or `--wrap 60` ) to wrap at around 60 columns. Setting `-w 0` removes all wrapping (i.e. all newlines).
 
 ## Examples
 
@@ -11,15 +11,15 @@ Every option has a short and a long form. In the examples below, `wordtohtml` is
 ```sh
 # copy the body content to the clipboard (the default)
 wordtohtml mypost.docx
-# copied to clipboard in approx. 90 columns
+# copied to clipboard in around 90 columns
 
 # write a complete minimal HTML document next to the input: mypost.docx -> mypost.html
 wordtohtml -o mypost.docx (or --output)
-# wrote mypost.html in approx. 90 columns
+# wrote mypost.html in around 90 columns
 
 # wrap the output near 60 columns instead of the default 90
 wordtohtml -w 60 mypost.docx (or --wrap)
-# wrote mypost.html in approx. 60 columns
+# wrote mypost.html in around 60 columns
 
 # one long line with no newlines to clipboard (handy for embedding or minifying)
 wordtohtml -w 0 mypost.docx
